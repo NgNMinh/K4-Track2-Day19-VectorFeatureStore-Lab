@@ -246,6 +246,7 @@ học viên cũng được. Full brief + self-checklist:
 | Triệu chứng | Fix |
 |---|---|
 | `setup-lite.sh` báo `python3: command not found` | Install Python 3.10+ (https://www.python.org/downloads/) |
+| `ensurepip is not available` khi tạo `.venv` (Ubuntu/WSL) | Trong Ubuntu/WSL chạy `sudo apt-get update`, rồi `sudo apt-get install python3.10-venv` (đổi `3.10` theo `python3 --version`), sau đó chạy lại `bash setup-lite.sh`; script tự sửa `.venv` tạo dở. Nếu `bash` từ PowerShell mở WSL, script dùng Python của WSL. |
 | `make api` → port 8000 in use | `lsof -ti:8000 \| xargs kill -9` hoặc đổi `--port 8001` |
 | NB1 báo `expected 1000 indexed, got X` | Chưa `make seed`; chạy lại |
 | NB2 hybrid không thắng | Check RRF công thức: `1/(k + rank)` **rank 1-based**, không phải 0-based |

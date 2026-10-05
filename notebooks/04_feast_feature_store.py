@@ -95,6 +95,21 @@ if res.stderr:
     print(res.stderr)
 assert res.returncode == 0, f"feast apply failed: {res.stderr}"
 
+# Confirm Feast registered all expected feature views in its metadata registry.
+views = subprocess.run(
+    ["feast", "feature-views", "list"],
+    cwd=str(FEAST_DIR),
+    capture_output=True, text=True, check=False,
+)
+print("FEATURE VIEWS:")
+print(views.stdout)
+if views.stderr:
+    print("STDERR:")
+    print(views.stderr)
+assert views.returncode == 0, f"feature-views list failed: {views.stderr}"
+for view_name in ("user_profile_features", "item_popularity_features", "query_velocity_features"):
+    assert view_name in views.stdout, f"Missing feature view: {view_name}"
+
 # %% [markdown]
 # ## 3. `feast materialize-incremental` — load offline → online
 #
@@ -147,7 +162,7 @@ print(f"Single lookup: {single_latency_ms:.2f}ms")
 print({k: v[0] for k, v in features.items()})
 
 # %% [markdown]
-# ## 5. TODO — Batch latency benchmark (100 lookups, P99)
+# ## 5. Batch latency benchmark (100 lookups, P99)
 
 # %%
 latencies: list[float] = []
@@ -185,7 +200,8 @@ else:
 import pandas as pd
 entity_df = pd.DataFrame({
     "user_id": ["u_001", "u_002", "u_003"],
-    "event_timestamp": [NOW - timedelta(hours=2), NOW - timedelta(hours=1), NOW],
+    # Each event time is at or after the corresponding feature source event.
+    "event_timestamp": [NOW, NOW - timedelta(hours=1), NOW - timedelta(hours=2)],
 })
 
 historical = fs.get_historical_features(
@@ -196,6 +212,19 @@ historical = fs.get_historical_features(
     ],
 ).to_df()
 print(historical)
+assert len(historical) == 3, f"Expected 3 PIT rows, got {len(historical)}"
+assert historical["reading_speed_wpm"].notna().all(), "Expected all three source values"
+
+# A separate event before u_001's source timestamp must not receive that future value.
+before_source = fs.get_historical_features(
+    entity_df=pd.DataFrame({
+        "user_id": ["u_001"],
+        "event_timestamp": [NOW - timedelta(hours=2)],
+    }),
+    features=["user_profile_features:reading_speed_wpm"],
+).to_df()
+assert "u_001" not in before_source["user_id"].tolist(), "PIT join leaked a future user_profile value"
+print("PIT check: all 3 eligible rows returned; u_001 before its source timestamp was excluded")
 
 # %% [markdown]
 # ## Deliverable evidence

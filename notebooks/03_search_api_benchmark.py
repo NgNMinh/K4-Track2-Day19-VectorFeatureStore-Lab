@@ -30,44 +30,59 @@ import httpx
 
 # %%
 ROOT = Path(_setup.__file__).resolve().parent.parent
-proc = subprocess.Popen(
-    ["uvicorn", "app.main:app", "--port", "8000", "--log-level", "warning"],
-    cwd=str(ROOT),
-)
-
-# Đợi server up + warm (Searcher.from_corpus loads embeddings + indexes 1000 docs)
 URL = "http://localhost:8000"
-for _ in range(60):
-    try:
-        r = httpx.get(f"{URL}/healthz", timeout=2.0)
-        if r.status_code == 200 and r.json().get("ready"):
-            break
-    except httpx.HTTPError:
-        pass
-    time.sleep(1)
-else:
-    raise RuntimeError("API didn't become ready within 60s")
+proc = None
 
-print(httpx.get(f"{URL}/healthz").json())
+# Reuse a ready server on :8000; only spawn uvicorn when no API is available.
+try:
+    r = httpx.get(f"{URL}/healthz", timeout=2.0)
+    ready = r.status_code == 200 and r.json().get("ready")
+except httpx.HTTPError:
+    ready = False
+
+if not ready:
+    proc = subprocess.Popen(
+        ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+        cwd=str(ROOT),
+    )
+    for _ in range(60):
+        try:
+            r = httpx.get(f"{URL}/healthz", timeout=2.0)
+            ready = r.status_code == 200 and r.json().get("ready")
+            if ready:
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(1)
+    if not ready:
+        raise RuntimeError("API didn't become ready within 60s")
+
+health = httpx.get(f"{URL}/healthz", timeout=5.0).json()
+assert health == {"ready": True, "n_docs": 1000}, health
+print("healthz:", health)
 
 # %% [markdown]
 # ## 2. Single query — kiểm tra response shape
 
 # %%
-r = httpx.get(f"{URL}/search", params={"q": "cloud computing tự động mở rộng", "mode": "hybrid"})
+sample_query = "cloud computing tự động mở rộng"
+r = httpx.get(f"{URL}/search", params={"q": sample_query, "mode": "hybrid"}, timeout=30.0)
 r.raise_for_status()
 body = r.json()
-print(f"latency_ms: {body['latency_ms']:.1f}")
-print(f"top-3 hits:")
+assert {"mode", "query", "latency_ms", "top_k", "hits"} <= body.keys(), body.keys()
+assert body["mode"] == "hybrid" and body["query"] == sample_query
+assert all({"doc_id", "title", "text", "score"} <= hit.keys() for hit in body["hits"])
+print("response fields:", {key: body[key] for key in ("mode", "query", "latency_ms", "top_k")})
+print("top-3 hits:")
 for h in body["hits"][:3]:
     print(f"  {h['doc_id']:>14}  score={h['score']:.4f}  {h['title']}")
 
 # %% [markdown]
-# ## 3. TODO — Latency benchmark (100 queries × 3 modes)
+# ## 3. Warmup + latency benchmark (100 queries × 3 modes)
 #
-# Dùng 50 golden queries × 2 reps = 100 calls/mode. Ghi nhận latency từ
-# `body["latency_ms"]` (server-side, đã trừ network) HOẶC từ wall-clock httpx
-# (bao gồm network) — note: rubric assert P99 < 50ms áp dụng cho server-side.
+# Gửi 10 truy vấn warmup để nạp model/cache, sau đó dùng 50 golden queries ×
+# 2 lượt = 100 calls/mode. Đo `body["latency_ms"]` phía server và wall-clock
+# phía client; ngưỡng rubric P99 < 50ms áp dụng cho server-side.
 #
 # Output: bảng P50/P95/P99 cho 3 mode.
 
@@ -85,15 +100,26 @@ def percentile(values: list[float], p: float) -> float:
     return sorted(values)[min(int(n * p), n - 1)]
 
 
+assert len(golden) == 50, f"Expected 50 golden queries, got {len(golden)}"
+
+warmup_queries = [q["query"] for q in golden[:10]]
+for q in warmup_queries:
+    r = httpx.get(f"{URL}/search", params={"q": q, "mode": "hybrid"}, timeout=30.0)
+    r.raise_for_status()
+print(f"Warmup complete: {len(warmup_queries)} queries")
+
+
 def benchmark_mode(mode: str, reps: int = 2) -> dict[str, float]:
     server_latencies: list[float] = []
     wall_latencies: list[float] = []
     for _ in range(reps):
         for q in golden:
             t0 = time.perf_counter()
-            r = httpx.get(f"{URL}/search", params={"q": q["query"], "mode": mode})
+            r = httpx.get(f"{URL}/search", params={"q": q["query"], "mode": mode}, timeout=30.0)
             wall_latencies.append((time.perf_counter() - t0) * 1000)
-            server_latencies.append(r.json()["latency_ms"])
+            r.raise_for_status()
+            server_latencies.append(float(r.json()["latency_ms"]))
+    assert len(server_latencies) == len(golden) * reps
     return {
         "p50_server": percentile(server_latencies, 0.50),
         "p95_server": percentile(server_latencies, 0.95),
@@ -124,19 +150,22 @@ else:
     print("  Check: re-run benchmark after 10 warm-up queries; or reduce RRF depth")
 
 # %% [markdown]
-# ## 5. Cleanup — stop the API server
+# ## 5. Cleanup — stop only the API server started by this notebook
 
 # %%
-proc.terminate()
-proc.wait(timeout=5)
-print("API server stopped")
+if proc is not None:
+    proc.terminate()
+    proc.wait(timeout=5)
+    print("API server started by notebook stopped")
+else:
+    print("Reused existing API server; left it running")
 
 # %% [markdown]
 # ## Deliverable evidence
 #
-# 1. Output cell 2: 1 single hybrid query response with `top-3 hits`.
-# 2. Output cell 3: latency table P50/P95/P99 for keyword/semantic/hybrid.
-# 3. Output cell 4: hybrid P99 < 50ms PASS.
+# 1. Sample `/search` response includes the required fields and top-3 hits.
+# 2. Benchmark output reports server-side P50/P95/P99 and client-side P99.
+# 3. Final cell reports whether hybrid P99 server-side is below 50ms.
 #
 # ---
 #

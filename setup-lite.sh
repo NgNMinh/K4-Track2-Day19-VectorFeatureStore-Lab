@@ -14,11 +14,25 @@ PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_i
 echo "[lite] system python3 is $PY_VER (the venv may differ — reported below)"
 
 # ── 2. venv ─────────────────────────────────────────────────────────────
-if [ ! -d ".venv" ]; then
+# A failed `python3 -m venv` can leave a directory without an activation
+# script. Check the environment itself so rerunning setup repairs that case.
+if [ ! -f .venv/bin/activate ] || [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import sys' >/dev/null 2>&1; then
+  if [ -e .venv ] && { [ ! -f .venv/pyvenv.cfg ] || [ -d .venv/Scripts ]; }; then
+    echo "[lite] .venv is not a Linux/macOS Python environment. Move it aside before rerunning setup."
+    exit 1
+  fi
   if command -v uv >/dev/null 2>&1; then
     echo "[lite] Creating venv with uv (faster)"
     uv venv .venv
   else
+    if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
+      echo "[lite] Python $PY_VER is missing ensurepip, which is required to create the venv."
+      echo "[lite] On Debian/Ubuntu (including WSL), run inside Linux:"
+      echo "    sudo apt-get update"
+      echo "    sudo apt-get install python${PY_VER}-venv"
+      echo "[lite] Then rerun: bash setup-lite.sh (a partial .venv will be repaired)."
+      exit 1
+    fi
     echo "[lite] Creating venv with python -m venv"
     python3 -m venv .venv
   fi
@@ -44,10 +58,11 @@ if command -v uv >/dev/null 2>&1; then
     uv pip install -r requirements.txt
   fi
 else
-  pip install -q -U pip
-  pip install -q -r requirements.txt
+  python -m pip --version >/dev/null 2>&1 || python -m ensurepip --upgrade
+  python -m pip install -q -U pip
+  python -m pip install -q -r requirements.txt
   if [ "$NEED_DILL_OVERRIDE" = "1" ]; then
-    pip install -q --upgrade 'dill>=0.4,<1.0'
+    python -m pip install -q --upgrade 'dill>=0.4,<1.0'
   fi
 fi
 
